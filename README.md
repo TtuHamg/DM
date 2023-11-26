@@ -1,2 +1,2 @@
 # DM
-The implementation of diffusion model
+The implementation of diffusion model.
