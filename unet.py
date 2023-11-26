@@ -2,6 +2,7 @@ import os
 import sys
 import warnings
 from abc import abstractmethod
+from einops import rearrange, reduce, repeat
 
 unet_path = os.getcwd()
 sys.path.append(unet_path)
@@ -116,8 +117,35 @@ class ResBlock(TimeResBlock):
 
 
 class AttentionBlock(nn.Module):
-    def __init__(self, ):
+    def __init__(self, channels, num_heads=1):
         super().__init__()
+        self.channels = channels
+        self.num_heads = num_heads
+
+        self.norm = nn.GroupNorm(32, channels)
+        self.qkv = nn.Conv1d(
+            channels, channels * 3, kernel_size=1
+        )  # equal to linear model: wx+b
+        self.proj_out = tools.zero_module(
+            nn.Conv1d(self.channels, self.channels, kernel_size=1)
+        )
+
+    def forward(self, x):
+        _, _, H, W = x.shape  # batch, channel, (H,W)
+        x = rearrange(x, "b c x y->b c (x y)")
+        qkv = self.qkv(self.norm(x)).chunk(3, dim=1)
+        q, k, v = map(
+            lambda t: rearrange(t, "b (h c) d -> b h c d", h=self.num_heads), qkv
+        )
+        _, _, head_dims, _ = q.shape
+        scale = head_dims**-0.5
+        atten = th.einsum("b h c t, b h c s->b h t s", q, k) * scale
+        atten = th.softmax(atten, dim=-1)
+        h = th.einsum("b h t s, b h c s-> b h c t", atten, v)
+        h = rearrange(h, "b h c t->b (h c) t")
+        h = self.proj_out(h)
+        return rearrange(x + h, "b c (h w)->b c h w", h=H, w=W)
+
 
 class Unet(nn.Module):
     def __init__(
