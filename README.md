@@ -1,2 +1,2 @@
 # DM
-The implementation of diffusion model.
+The Pytorch implementation of diffusion model by TtuHamg.
