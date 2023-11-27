@@ -230,6 +230,21 @@ class Unet(nn.Module):
         use_cond_scale_shift=False,
         sample_use_conv=True,
     ):
+        """_summary_
+
+        Args:
+            in_channels (int): the channels of input image, default=3
+            out_channels (int): the channels of output iamge, default=3
+            model_channels (int): base channel num of unet model, other channels is usually a multiple of model_channels
+            num_classes (int): used to map class index to class_embed
+            num_res_blocks (int): resblock number in each depth of unet
+            attention_resolution (list): which resolution is need to attetion operation
+            dropout (int, optional): Defaults to 0.
+            channel_mult (tuple, optional): used to scale the model_channels to present the channel num in each resolution. Defaults to (1, 2, 4, 8).
+            num_heads (int, optional):  the number of heads in attention. Defaults to 1.
+            use_cond_scale_shift (bool, optional): introducing mechanisms of conditions, whether use scale and shift / use just add". Defaults to False.
+            sample_use_conv (bool, optional): whether use learnable conv after F.interpolate. Defaults to True.
+        """
         super().__init__()
 
         self.in_channels = in_channels

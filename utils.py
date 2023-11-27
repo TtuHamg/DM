@@ -1,5 +1,8 @@
 import torch as th
 import math
+import numpy as np
+
+# --------------------unet.py------------------- #
 
 
 def zero_module(module):
@@ -32,3 +35,38 @@ def timestep_embedding(timestep, dim, max_period=10000):
     pos_embed[:, 1::2] = th.cos(args)
 
     return pos_embed
+
+
+# --------------------gaussian_diffusion.py------------------- #
+
+
+def extract_into_tensor(arr, timestep, broadcast_shape):
+    coe = th.from_numpy(arr).to(device=timestep.device)[timestep].float()
+    while len(coe.shape) < len(broadcast_shape):
+        coe = coe[..., None]
+    return coe
+
+
+def create_beta_schedule(schedule_name, num_diffusion_time_step):
+    if schedule_name == "linear":
+        scale = 1000 / num_diffusion_time_step
+        beta_start = scale * 0.0001
+        beta_end = scale * 0.02
+        return np.linspace(
+            beta_start, beta_end, num_diffusion_time_step, dtype=np.float64
+        )
+    elif schedule_name == "cosine":
+        pass
+
+
+def scale_time_step(t, num_time_step):
+    """according to the num_time_step to scale t
+
+    Args:
+        t (float list): time step
+        num_time_step (int): total number step
+
+    Returns:
+        float: scaled time step
+    """
+    return t.float() * (1000.0 / num_time_step)
