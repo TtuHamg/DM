@@ -248,7 +248,7 @@ class Unet(nn.Module):
         self.time_embed = nn.Sequential(
             nn.Linear(self.model_channels, time_embed_dim),
             nn.SiLU(),
-            nn.Linear(self.model_channels, time_embed_dim),
+            nn.Linear(time_embed_dim, time_embed_dim),
         )
 
         if num_classes is not None:
@@ -312,7 +312,7 @@ class Unet(nn.Module):
             ),
         )
 
-        self.output_blocks = nn.ModuleDict([])
+        self.output_blocks = nn.ModuleList([])
         # print("input_block_channels")
         # print(input_block_channels)
         # :[128, 128, 128, 128, 256, 256, 256, 512, 512, 512, 1024, 1024]
@@ -332,7 +332,7 @@ class Unet(nn.Module):
                     layers.append(
                         LinearAttentionBlock(current_channels, self.num_heads)
                     )
-                if i == self.num_res_blocks:
+                if depth and i == self.num_res_blocks:  # when depth==0, don't upsample
                     layers.append(UpSample(current_channels, self.sample_use_conv))
                     current_resolution //= 2
                 self.output_blocks.append(TimeOrRegularWapper(*layers))
@@ -361,8 +361,13 @@ class Unet(nn.Module):
         for moudle in self.input_blocks:
             h = moudle(h, embed_all)
             down_history.append(h)
+
         h = self.middle_block(h, embed_all)
+
         for module in self.output_blocks:
             cat_in = th.cat([h, down_history.pop()], dim=1)
             h = module(cat_in, embed_all)
+            print("-------")
+            print(h[0, 0, 0:5, 0:5])
+
         return self.out(h)
