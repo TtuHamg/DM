@@ -8,6 +8,7 @@ unet_path = os.getcwd()
 sys.path.append(unet_path)
 
 import torch.nn as nn
+import torch.nn.functional as F
 import torch as th
 import utils as tools
 
@@ -89,7 +90,9 @@ class ResBlock(TimeResBlock):
                 self.in_channels, self.out_channels, kernel_size=3, padding=1
             )
         else:
-            raise ValueError(f"Either keep channels consistent or use_conv.")
+            self.skip_connection = nn.Conv2d(
+                self.in_channels, self.out_channels, kernel_size=1
+            )
 
     def forward(self, x, embed):
         """forward process about unet
@@ -108,7 +111,7 @@ class ResBlock(TimeResBlock):
         if self.use_cond_scale_shift:
             out_norm, out_remain = self.out_layers[0], self.out_layers[1:]
             scale, shift = th.chunk(embed_out, 2, dim=1)
-            h = out_norm(h) * scale + shift
+            h = out_norm(h) * (1 + scale) + shift
             h = out_remain(h)
         else:
             h = h + embed_out
@@ -116,21 +119,37 @@ class ResBlock(TimeResBlock):
         return self.skip_connection(x) + h
 
 
-class AttentionBlock(nn.Module):
+class LinearAttentionBlock(nn.Module):
+    """the implementation of attention according to official IDDPM,
+        which is a little differene with ViT attention(timm package). For instance,
+        ViT has dropout after proj_out and use LN on q and k after qkv project
+
+    Args:
+        nn (_type_): _description_
+    """
+
     def __init__(self, channels, num_heads=1):
         super().__init__()
         self.channels = channels
         self.num_heads = num_heads
 
-        self.norm = nn.GroupNorm(32, channels)
+        self.norm = nn.GroupNorm(32, self.channels)
         self.qkv = nn.Conv1d(
-            channels, channels * 3, kernel_size=1
-        )  # equal to linear model: wx+b
+            self.channels, self.channels * 3, kernel_size=1
+        )  # equal to linear model: wx+b, it's ok to use nn.Linear
         self.proj_out = tools.zero_module(
             nn.Conv1d(self.channels, self.channels, kernel_size=1)
         )
 
     def forward(self, x):
+        """
+
+        Args:
+            x (tensor): input of attentionblock
+
+        Returns:
+            tensor: output of attentionblock
+        """
         _, _, H, W = x.shape  # batch, channel, (H,W)
         x = rearrange(x, "b c x y->b c (x y)")
         qkv = self.qkv(self.norm(x)).chunk(3, dim=1)
@@ -147,6 +166,55 @@ class AttentionBlock(nn.Module):
         return rearrange(x + h, "b c (h w)->b c h w", h=H, w=W)
 
 
+class DownSample(nn.Module):
+    """downsample module of  unet"""
+
+    def __init__(self, channels, use_conv=False):
+        """
+        Args:
+            channels (int): input channels
+            use_conv (bool): if true, use conv to downsample, else use avgpool
+        """
+        super().__init__()
+        self.channels = channels
+        self.use_conv = use_conv
+        if use_conv:
+            self.down = nn.Conv2d(
+                in_channels=self.channels,
+                out_channels=self.channels,
+                kernel_size=3,
+                stride=2,
+                padding=1,
+            )
+        else:
+            self.down = nn.AvgPool2d(kernel_size=2)
+
+    def forward(self, x):
+        assert x.shape[1] == self.channels
+        return self.down(x)
+
+
+class UpSample(nn.Module):
+    def __init__(self, channels, use_conv=False):
+        super().__init__()
+        self.channels = channels
+        self.use_conv = use_conv
+        if use_conv:
+            self.conv = nn.Conv2d(
+                in_channels=self.channels,
+                out_channels=self.channels,
+                kernel_size=3,
+                padding=1,
+            )
+
+    def forward(self, x):
+        assert x.shape[1] == self.channels
+        x = F.interpolate(x, scale_factor=2, mode="nearest")
+        if self.use_conv:
+            x = self.conv(x)
+        return x
+
+
 class Unet(nn.Module):
     def __init__(
         self,
@@ -158,7 +226,9 @@ class Unet(nn.Module):
         attention_resolution,
         dropout=0,
         channel_mult=(1, 2, 4, 8),
+        num_heads=1,
         use_cond_scale_shift=False,
+        sample_use_conv=True,
     ):
         super().__init__()
 
@@ -170,10 +240,12 @@ class Unet(nn.Module):
         self.attention_resolution = attention_resolution
         self.dropout = dropout
         self.channel_mult = channel_mult
+        self.num_heads = num_heads
         self.use_cond_scale_shift = use_cond_scale_shift
+        self.sample_use_conv = sample_use_conv
 
         time_embed_dim = self.model_channels * 4
-        self.tim_embed = nn.Sequential(
+        self.time_embed = nn.Sequential(
             nn.Linear(self.model_channels, time_embed_dim),
             nn.SiLU(),
             nn.Linear(self.model_channels, time_embed_dim),
@@ -195,6 +267,7 @@ class Unet(nn.Module):
         )
 
         current_channels = model_channels
+        input_block_channels = [current_channels]
         current_resolution = 1
         for depth, mult in enumerate(self.channel_mult):
             for _ in range(self.num_res_blocks):
@@ -209,4 +282,87 @@ class Unet(nn.Module):
                 ]
                 current_channels = mult * self.model_channels
                 if current_resolution in self.attention_resolution:
-                    layers.append()
+                    layers.append(
+                        LinearAttentionBlock(current_channels, self.num_heads)
+                    )
+                self.input_blocks.append(TimeOrRegularWapper(*layers))
+                input_block_channels.append(current_channels)
+            if depth != len(channel_mult) - 1:
+                self.input_blocks.append(
+                    TimeOrRegularWapper(
+                        DownSample(current_channels, self.sample_use_conv)
+                    )
+                )
+                input_block_channels.append(current_channels)
+                current_resolution *= 2
+
+        self.middle_block = TimeOrRegularWapper(
+            ResBlock(
+                current_channels,
+                time_embed_dim,
+                self.dropout,
+                use_cond_scale_shift=self.use_cond_scale_shift,
+            ),
+            LinearAttentionBlock(current_channels, num_heads=self.num_heads),
+            ResBlock(
+                current_channels,
+                time_embed_dim,
+                self.dropout,
+                use_cond_scale_shift=self.use_cond_scale_shift,
+            ),
+        )
+
+        self.output_blocks = nn.ModuleDict([])
+        # print("input_block_channels")
+        # print(input_block_channels)
+        # :[128, 128, 128, 128, 256, 256, 256, 512, 512, 512, 1024, 1024]
+        for depth, mult in list(enumerate(channel_mult))[::-1]:
+            for i in range(self.num_res_blocks + 1):
+                layers = [
+                    ResBlock(
+                        current_channels + input_block_channels.pop(),
+                        time_embed_dim,
+                        self.dropout,
+                        out_channels=self.model_channels * mult,
+                        use_cond_scale_shift=self.use_cond_scale_shift,
+                    )
+                ]
+                current_channels = self.model_channels * mult
+                if current_resolution in attention_resolution:
+                    layers.append(
+                        LinearAttentionBlock(current_channels, self.num_heads)
+                    )
+                if i == self.num_res_blocks:
+                    layers.append(UpSample(current_channels, self.sample_use_conv))
+                    current_resolution //= 2
+                self.output_blocks.append(TimeOrRegularWapper(*layers))
+
+        self.out = nn.Sequential(
+            nn.GroupNorm(32, model_channels),
+            nn.SiLU(),
+            tools.zero_module(
+                nn.Conv2d(model_channels, self.out_channels, kernel_size=3, padding=1)
+            ),
+        )
+
+    def forward(self, x, timestep, y=None):
+        assert (y is not None) == (self.num_classes is not None)
+        down_history = []
+        time_embed = self.time_embed(
+            tools.timestep_embedding(timestep, self.model_channels)
+        )
+
+        if self.num_classes is not None:
+            assert y.shape == (x.shape[0],)
+            embed_all = time_embed + self.label_embed(y)
+        else:
+            embed_all = time_embed
+        h = x
+        for moudle in self.input_blocks:
+            h = moudle(h, embed_all)
+            down_history.append(h)
+        h = self.middle_block(h, embed_all)
+        for module in self.output_blocks:
+            cat_in = th.cat([h, down_history.pop()], dim=1)
+            h = module(cat_in, embed_all)
+        return self.out(h)
