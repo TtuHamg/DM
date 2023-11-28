@@ -261,7 +261,7 @@ class GaussianDiffusion:
 
         Args:
             x_t (tensor): x_{t}
-            eps (tensor): eps
+            eps (tensor): epsilon
 
         Returns:
             tensor: x_{0}
@@ -274,4 +274,121 @@ class GaussianDiffusion:
         )
 
     def _predict_eps_from_xstart(self, x_t, t, pred_xstart):
-        pass
+        """x_{t}=sqrt_alphas_cumprod * x_{0} + sqrt_beta_cumprod * eps
+
+        Args:
+            x_t (tensor): x_{t}
+            pred_xstart (tensor): x_start predicted by model
+
+        Returns:
+            tensor: epsilon
+        """
+        assert x_t.shape == pred_xstart.shape
+        return (
+            tools.extract_into_tensor(self.sqrt_inv_alphas_cumprod, t, x_t.shape) * x_t
+            - pred_xstart
+        ) / tools.extract_into_tensor(self.sqrt_invm1_alphas_cumprod, t, x_t.shape)
+
+    def p_sample(
+        self, model, x, t, clip_denoised=True, denoised_fn=None, model_kwargs=None
+    ):
+        """sample x_{t-1} from x_{t}, which t is given in the params
+
+        Args:
+            model (nn.Module): default unet
+            x (tesor): x_{t}
+            t (tuple/list): time step
+            clip_denoised (True, optional): whether clip x_start to [-1, 1]. Defaults to True.
+            denoised_fn (False, optional):  a function which applies to the x_start prediction before it is used to sample. Defaults to None.
+            model_kwargs (_type_, optional): _description_. Defaults to None.
+
+        Returns:
+            a dict containing the following keys:
+            - 'sample': a random sample x_{t-1} from the model.
+            - 'pred_xstart': a prediction of x_0.
+        """
+        out = self.p_mean_variance(
+            model,
+            x,
+            t,
+            clip_denoised=clip_denoised,
+            denoised_fn=denoised_fn,
+            model_kwargs=model_kwargs,
+        )
+        noise = th.randn_like(x)
+        noise = th.randn_like(x)
+        nonzero_mask = (t != 0).float().unsqueeze(-1)  # no noise when t == 0
+        sample = out["mean"] + nonzero_mask * th.exp(0.5 * out["log_variance"]) * noise
+
+        return {"sample": sample, "pred_xstart": out["pred_xstart"]}
+
+    def p_sample_loop(
+        self,
+        model,
+        shape,
+        noise=None,
+        clip_denoised=True,
+        denoised_fn=None,
+        model_kwargs=None,
+        device=None,
+        progress=False,
+    ):
+        """generate samples from the model
+
+        Args:
+            model (nn.Module): default unet
+            shape (_type_): the shape of the samples, (N, C, H, W)
+            noise (tensor, optional): x_{T}. Defaults to None.
+            device (_type_, optional): if specified, the device to create the samples on.
+                       If not specified, use a model parameter's device.. Defaults to None.
+            progress (bool, optional): whether use tqdm to show process. Defaults to False.
+
+        Returns:
+            _type_: _description_
+        """
+        final = None
+        for sample in self.p_sample_loop_progressive(
+            model,
+            shape,
+            noise,
+            clip_denoised,
+            denoised_fn,
+            model_kwargs,
+            device,
+            progress,
+        ):
+            final = sample
+        return final["sample"]
+
+    def p_sample_loop_progressive(
+        self,
+        model,
+        shape,
+        noise=None,
+        clip_denoised=True,
+        denoised_fn=None,
+        model_kwargs=None,
+        device=None,
+        progress=False,
+    ):
+        if device == None:
+            device = next(model.parameters()).device  # parameters() returns a iterator
+        assert isinstance(shape, (tuple, list))
+        if noise is not None:
+            img = noise  # x_{T}
+        else:
+            img = th.randn(*shape, device=device)
+        indices = list(range(self.num_time_step))[::-1]
+
+        if progress:
+            from tqdm.auto import tqdm
+
+            indices = tqdm(indices)
+        for i in indices:
+            t = th.tensor([i] * shape[0], device=device)  # each img in batch has t
+            with th.no_grad():
+                out = self.p_sample(
+                    model, img, t, clip_denoised, denoised_fn, model_kwargs
+                )
+                yield out
+                img = out["sample"]  # x_{t-1} is regarded as next loop's x_{t}
