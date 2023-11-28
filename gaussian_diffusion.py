@@ -54,6 +54,9 @@ class GaussianDiffusion:
         self,
         *,
         betas,
+        model_mean_type,
+        model_var_type,
+        loss_type,
         rescale_time_step=False,
     ):
         self.rescale_time_step = rescale_time_step
@@ -140,3 +143,8 @@ class GaussianDiffusion:
             t = tools.scale_time_step(t, self.num_time_step)
 
         model_output = model(x, t, **model_kwargs)
+        
+        if self.model_var_type in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
+            pass
+        else:
+            pass
