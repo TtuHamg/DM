@@ -142,12 +142,15 @@ class GaussianDiffusion:
         posterior_variance = tools.extract_into_tensor(
             self.posterior_variance, t, x_t.shape
         )
+        posterior_log_variance_clipped = tools.extract_into_tensor(
+            self.posterior_log_variance_clipped, t, x_t.shape
+        )
 
         assert (
             posterior_mean.shape[0] == posterior_variance.shape[0] == x_start.shape[0]
         )
 
-        return posterior_mean, posterior_variance
+        return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
     def p_mean_variance(
         self, model, x, t, clip_denoised=True, denoised_fn=None, model_kwargs=None
@@ -525,3 +528,21 @@ class GaussianDiffusion:
                 )
                 yield out
                 img = out["sample"]  # x_{t-1} is regarded as next loop's x_{t}
+
+    def vlb(
+        self,
+        model,
+        x_start,
+        x_t,
+        t,
+        clip_denoised=True,
+        model_kwargs=None,
+    ):
+        true_mean, _, true_log_variance_clipped = self.q_posterior_mean_variance(
+            x_start=x_start, x_t=x_t, t=t
+        )
+
+        out = self.p_mean_variance(
+            model, x_t, t, clip_denoised=clip_denoised, model_kwargs=model_kwargs
+        )
+    

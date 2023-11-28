@@ -70,3 +70,25 @@ def scale_time_step(t, num_time_step):
         float: scaled time step
     """
     return t.float() * (1000.0 / num_time_step)
+
+
+def calculate_kl(mean1, logvar1, mean2, logvar2):
+    tensor = None
+    for obj in (mean1, logvar1, mean2, logvar2):
+        if isinstance(obj, th.Tensor):
+            tensor = obj
+            break
+    assert tensor is not None, "at least one argument must be tensor."
+
+    logvar1, logvar2 = [
+        x if isinstance(x, th.Tensor) else th.tensor(x).to(tensor)
+        for x in (logvar1, logvar2)
+    ]
+
+    return 0.5 * (
+        -1
+        + logvar2
+        - logvar1
+        + th.exp(logvar1 - logvar2)
+        + ((mean1 - mean2) ** 2) * th.exp(-logvar2)
+    )
