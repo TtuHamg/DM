@@ -152,6 +152,22 @@ class GaussianDiffusion:
     def p_mean_variance(
         self, model, x, t, clip_denoised=True, denoised_fn=None, model_kwargs=None
     ):
+        """get p(x_{t-1} | x_{t}) mean and var, as well as a prediction of the initial x_0
+
+        Args:
+            model (nn.Module): default unet
+            x (tensor): x_t
+            t (_type_): time step
+        Raises:
+            NotImplementedError: model mean type not implementation
+
+        Returns:
+            dict: a dict with the following keys:
+                 - 'mean': the model mean output.
+                 - 'variance': the model variance output.
+                 - 'log_variance': the log of 'variance'.
+                 - 'pred_xstart': the prediction for x_0.
+        """
         if model_kwargs is None:
             model_kwargs = {}
 
@@ -388,6 +404,123 @@ class GaussianDiffusion:
             t = th.tensor([i] * shape[0], device=device)  # each img in batch has t
             with th.no_grad():
                 out = self.p_sample(
+                    model, img, t, clip_denoised, denoised_fn, model_kwargs
+                )
+                yield out
+                img = out["sample"]  # x_{t-1} is regarded as next loop's x_{t}
+
+    def ddim_sample(
+        self,
+        model,
+        x,
+        t,
+        clip_denoised=True,
+        denoised_fn=None,
+        model_kwargs=None,
+    ):
+        """DDIM sample. When sigma is implemented as follows, it degraded to DDPM.
+
+        Args:
+            model (nn.Module): default unet
+            x (tensor): x_{t}
+
+        Returns:
+            tensor: x_{t-1}
+        """
+        out = self.p_mean_variance(
+            model, x, t, clip_denoised, denoised_fn, model_kwargs
+        )
+
+        eps = self._predict_eps_from_xstart(x, t, out["pred_xstart"])
+        alpha_bar = tools.extract_into_tensor(self.alphas_cumprod, t, x.shape)
+        alpha_bar_prev = tools.extract_into_tensor(self.alphas_cumprod_prev, t, x.shape)
+        sigma = th.sqrt((1.0 - alpha_bar_prev) / (1.0 - alpha_bar)) * th.sqrt(
+            1 - alpha_bar / alpha_bar_prev
+        )
+        noise = th.randn_like(x)
+        mean_pred = (
+            out["pred_xstart"] * th.sqrt(alpha_bar_prev)
+            + th.sqrt(1 - alpha_bar_prev - sigma**2) * eps
+        )
+
+        nonzero_mask = (t != 0).float().unsqueeze(-1)  # no noise when t == 0
+        sample = mean_pred + nonzero_mask * sigma * noise
+
+        return {"sample": sample, "pred_xstart:": out["pred_xstart"]}
+
+    def ddim_deterministic_sample(
+        self,
+        model,
+        x,
+        t,
+        clip_denoised=True,
+        denoised_fn=None,
+        model_kwargs=None,
+    ):
+        """different from official IDDPM. When sigma=0, it's a deterministic sample
+
+        Args:
+            model (nn.Module): default unet
+            x (tensor): x_{t}
+
+        Returns:
+            tensor: x_{t-1}
+        """
+        out = self.p_mean_variance(
+            model, x, t, clip_denoised, denoised_fn, model_kwargs
+        )
+        eps = self._predict_eps_from_xstart(x, t, out["pred_xstart"])
+        alpha_bar = tools.extract_into_tensor(self.alphas_cumprod, t, x.shape)
+        alpha_bar_prev = tools.extract_into_tensor(self.alphas_cumprod_prev, t, x.shape)
+        mean_pred = (
+            out["pred_xstart"] * th.sqrt(alpha_bar_prev)
+            + th.sqrt(1 - alpha_bar_prev) * eps
+        )
+        return {"sample": mean_pred, "pred_xstart": out["pred_xstart"]}
+
+    def ddim_sample_loop(
+        self,
+        model,
+        shape,
+        noise=None,
+        clip_denoised=True,
+        denoised_fn=None,
+        model_kwargs=None,
+        device=None,
+        progress=False,
+    ):
+        final = None
+        pass
+
+    def ddim_sample_loop_progressive(
+        self,
+        model,
+        shape,
+        noise=None,
+        clip_denoised=True,
+        denoised_fn=None,
+        model_kwargs=None,
+        device=None,
+        progress=False,
+    ):
+        if device == None:
+            device = next(model.parameters()).device  # parameters() returns a iterator
+        assert isinstance(shape, (tuple, list))
+        if noise is not None:
+            img = noise  # x_{T}
+        else:
+            img = th.randn(*shape, device=device)
+        indices = list(range(self.num_time_step))[::-1]
+
+        if progress:
+            from tqdm.auto import tqdm
+
+            indices = tqdm(indices)
+
+        for i in indices:
+            t = th.tensor([i] * shape[0], device=device)  # each img in batch has t
+            with th.no_grad():
+                out = self.ddim_sample(
                     model, img, t, clip_denoised, denoised_fn, model_kwargs
                 )
                 yield out
