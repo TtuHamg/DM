@@ -382,7 +382,4 @@ class Unet(nn.Module):
         for module in self.output_blocks:
             cat_in = th.cat([h, down_history.pop()], dim=1)
             h = module(cat_in, embed_all)
-            print("-------")
-            print(h[0, 0, 0:5, 0:5])
-
         return self.out(h)

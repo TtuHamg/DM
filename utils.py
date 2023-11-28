@@ -44,7 +44,7 @@ def extract_into_tensor(arr, timestep, broadcast_shape):
     coe = th.from_numpy(arr).to(device=timestep.device)[timestep].float()
     while len(coe.shape) < len(broadcast_shape):
         coe = coe[..., None]
-    return coe
+    return coe.expand(broadcast_shape)  # other place need to aseert shape consistent
 
 
 def create_beta_schedule(schedule_name, num_diffusion_time_step):
