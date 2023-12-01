@@ -92,3 +92,53 @@ def calculate_kl(mean1, logvar1, mean2, logvar2):
         + th.exp(logvar1 - logvar2)
         + ((mean1 - mean2) ** 2) * th.exp(-logvar2)
     )
+
+
+def mean_flat(kl):
+    return kl.mean(dim=list(range(1, len(kl.shape))))
+
+
+def approx_standard_normal_cdf(x):
+    """a fast approximation of the cumulative distribution function(CDF) of the standard model.
+    In fact, it's GELU(gaussian error linear unit) implementation in pytorch
+
+    Args:
+        x (tensor): standard gaussian
+
+    Returns:
+        tensor: the approximation of the standard normal cdf.
+    """
+    return 0.5 * (1.0 + th.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * th.pow(x, 3))))
+
+
+def discretized_gaussian_log_likelihood(x, *, means, log_scales):
+    """By taking the difference of the cumulative distribution functions of continuous distributions,
+    one can simulate discrete distributions
+
+    Args:
+        x (tensor): the target image which is uint8 values, rescaled to range [-1,1]
+        means (tensor): gaussian mean tensor
+        log_scales (tensor): gaussian log std tensor
+    """
+    assert x.shape == means.shape == log_scales.shape
+    centered_x = x - means
+    inv_std = th.exp(log_scales)
+    plus_in = inv_std * (centered_x + 1.0 / 255.0)
+    min_in = inv_std * (centered_x - 1.0 / 255.0)
+    cdf_plus = approx_standard_normal_cdf(plus_in)
+    cdf_min = approx_standard_normal_cdf(min_in)
+
+    # keep stability
+    log_cdf_plus = th.log(cdf_plus.clamp(min=1e-12))
+    log_one_minus_cdf_min = th.log((1.0 - cdf_min).clamp(min=1e-12))
+    cdf_delta = cdf_plus - cdf_min
+
+    # when x is larger than 0.999, prefer to use log_one_minus_cdf_min to present zero
+    # when x is smaller than -0.999, prefer to use log_cdf_plus to ensure stability.
+    log_probs = th.where(
+        x < -0.999,
+        log_cdf_plus,
+        th.where(x > 0.999, log_one_minus_cdf_min, th.log(cdf_delta.clamp(min=1e-12))),
+    )
+    assert log_probs.shape == x.shape
+    return log_probs

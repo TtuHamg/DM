@@ -493,7 +493,18 @@ class GaussianDiffusion:
         progress=False,
     ):
         final = None
-        pass
+        for sample in self.ddim_sample_loop_progressive(
+            model,
+            shape,
+            noise=noise,
+            clip_denoised=clip_denoised,
+            denoised_fn=denoised_fn,
+            model_kwargs=model_kwargs,
+            device=device,
+            progerss=progress,
+        ):
+            final = sample
+        return final["sample"]
 
     def ddim_sample_loop_progressive(
         self,
@@ -545,4 +556,17 @@ class GaussianDiffusion:
         out = self.p_mean_variance(
             model, x_t, t, clip_denoised=clip_denoised, model_kwargs=model_kwargs
         )
-    
+        kl = tools.calculate_kl(
+            true_mean, true_log_variance_clipped, out["mean"], out["log_variance"]
+        )
+        kl = tools.mean_flat(kl) / np.log(2.0)
+
+        decoder_nll = -tools.discretized_gaussian_log_likelihood(
+            x_start, means=out["mean"], log_scales=0.5 * out["log_variance"]
+        )
+
+        assert decoder_nll.shape == x_start.shape
+        decoder_nll = tools.mean_flat(decoder_nll) / np.log(2.0)
+
+        output = th.where((t == 0), decoder_nll, kl)
+        return {"output": output, "pred_xstart": out["pred_xstart"]}
