@@ -549,6 +549,19 @@ class GaussianDiffusion:
         clip_denoised=True,
         model_kwargs=None,
     ):
+        """calcualte the variationsal lower-bound: L_t(0<t<T) or L_0
+
+        Args:
+            model (nn.Module): unet
+            x_start (the target img): which is sampled, not the x_start's mean!
+            x_t (tensor): input of the model
+            t (list/float): consistent with x_t
+
+        Returns:
+            dict:
+                "output": calculate the nll(-log(q(x_0 | x_1))) or kl( KL(q(x_{t-1}|x_{t}) || p(x_{t-1}|x_{t})) )
+                "pred_xstart": predict the target image.
+        """
         true_mean, _, true_log_variance_clipped = self.q_posterior_mean_variance(
             x_start=x_start, x_t=x_t, t=t
         )
@@ -570,3 +583,144 @@ class GaussianDiffusion:
 
         output = th.where((t == 0), decoder_nll, kl)
         return {"output": output, "pred_xstart": out["pred_xstart"]}
+
+    def training_losses(self, model, x_start, t, model_kwargs=None, noise=None):
+        if model_kwargs is None:
+            model_kwargs = {}
+        if noise is None:
+            noise = th.randn_like(x_start)
+        x_t = self.q_sample(x_start, t, noise)
+
+        terms = {}
+
+        if self.loss_type == LossType.KL or self.loss_type == LossType.RESCALED_KL:
+            terms["loss"] = self.vlb(
+                model=model,
+                x_start=x_start,
+                x_t=x_t,
+                clip_denoised=False,
+                model_kwargs=model_kwargs,
+            )["output"]
+            if self.loss_type == LossType.RESCALED_KL:
+                terms["loss"] *= self.num_time_step  # evaluate the full vlb(1~T)
+        elif self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE:
+            model_output = model(
+                x_t, tools.scale_time_step(t, self.num_time_step), **model_kwargs
+            )
+
+            if self.model_var_type in [
+                ModelVarType.LEARNED,
+                ModelVarType.LEARNED_RANGE,
+            ]:
+                B, C = x_t.shape[:2]
+                assert model_output.shape == (B, C * 2, *x_t.shape[2:])
+                model_output, model_var_values = th.split(model_output, C, dim=1)
+                # the learnable variance is updated by the kl loss, but the learnable mean is updated by the mse loss!
+                frozen_out = th.cat([model_output.detach(), model_var_values], dim=1)
+                # in this case, the model is lambda func, unet model's input is in *args.
+                terms["vb"] = self.vlb(
+                    model=lambda *args, r=frozen_out: r,
+                    x_start=x_start,
+                    x_t=x_t,
+                    t=t,
+                    clip_denoised=False,
+                )["output"]
+                if self.loss_type == LossType.RESCALED_MSE:
+                    # unlike RESCALED_KL use t_kl mul num_time_step present 0~T_KL
+                    # a little different from RESCALED_KL
+                    terms["vb"] *= self.num_time_step / 1000.0
+
+            target = {
+                ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
+                    x_start=x_start, x_t=x_t, t=t
+                )[0],
+                ModelMeanType.START_X: x_start,
+                ModelMeanType.EPSILON: noise,
+            }[self.model_mean_type]
+
+            assert model_output.shape == target.shape == x_start.shape
+            terms["mse"] = tools.mean_flat((target - model_output) ** 2)
+            if "vb" in terms:
+                terms["loss"] = terms["mse"] + terms["vb"]
+            else:
+                terms["loss"] = terms["mse"]
+        else:
+            raise NotImplementedError(self.loss_type)
+
+        return terms
+
+    def prior_bpd(self, x_start):
+        """Get the prior KL term for the variational lower-bound, measured in
+        bits-per-dim. the result indicates how many information the raw image contained
+
+        Args:
+            x_start (tensor): input image
+
+        Returns:
+            float: a batch of [N] kl values(in bits), on per batch element.
+        Notes:
+            in paper, per dim mean in batch dim, which indicates one img.
+        """
+        batch_size = x_start.shape[0]
+        T = th.tensor([self.num_time_step - 1] * batch_size, device=x_start.device)
+        qt_mean, _, qt_log_variance = self.q_mean_variance(x_start=x_start, t=T)
+        kl_prior = tools.calculate_kl(
+            mean1=qt_mean, logvar1=qt_log_variance, mean2=0.0, logvar2=0.0
+        )
+        return tools.mean_flat(kl_prior) / np.log(2.0)
+
+    def calculate_bpd_loop(self, model, x_start, clip_denoised=True, model_kwargs=None):
+        """compute the entire variational lower-bound, measured in bits-per-dim
+
+        Args:
+            model (nn.Module): default unet
+            x_start (tensor): [N x C x ...] input
+            clip_denoised (bool, optional): _description_. Defaults to True.
+            model_kwargs (_type_, optional): _description_. Defaults to None.
+
+        Returns: a dict containing the following keys:
+                 - total_bpd: the total variational lower-bound, per batch element.
+                 - prior_bpd: the prior term in the lower-bound.
+                 - vb: an [N x T] tensor of terms in the lower-bound.
+                 - xstart_mse: an [N x T] tensor of x_0 MSEs for each timestep.
+                 - noise_mse: an [N x T] tensor of epsilon MSEs for each timestep.
+        """
+        device = x_start.device
+        batch_size = x_start.shape[0]
+
+        vb = []
+        xstart_mse = []
+        noise_mse = []
+        for t in list(range(self.num_time_step))[::-1]:
+            t_batch = th.tensor([t] * batch_size, device=device)
+            noise = th.randn_like(x_start)
+            x_t = self.q_sample(x_start=x_start, t=t_batch, noise=noise)
+            with th.no_grad():
+                out = self.vlb(
+                    model=model,
+                    x_start=x_start,
+                    x_t=x_t,
+                    t=t_batch,
+                    clip_denoised=clip_denoised,
+                    model_kwargs=model_kwargs,
+                )
+            vb.append(out["ouotput"])
+            xstart_mse.append(tools.mean_flat((out["pred_xstart"] - x_start) ** 2))
+            eps = self._predict_eps_from_xstart(
+                x_t=x_t, t=t_batch, pred_xstart=out["pred_xstart"]
+            )
+            noise_mse.append(tools.mean_flat((eps - noise) ** 2))
+
+        vb = th.stack(vb, dim=1)
+        xstart_mse = th.stack(xstart_mse, dim=1)
+        noise_mse = th.stack(noise_mse, dim=1)
+
+        prior_bpd = self.prior_bpd(x_start=x_start)
+        total_bpd = vb.sum(dim=1) + prior_bpd
+        return {
+            "total_bpd": total_bpd,
+            "prior_bpd": prior_bpd,
+            "vb": vb,
+            "xstart_mse": xstart_mse,
+            "noise_mse": noise_mse,
+        }
