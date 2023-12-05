@@ -3,7 +3,8 @@
 
 import socket
 import os
-
+import blobfile as bf
+import io
 import torch.distributed as dist
 import torch as th
 from mpi4py import MPI
@@ -37,8 +38,18 @@ def setup_dist():
 
 def dev():
     if th.cuda.is_available():
-        return th.device(f"cuda:{MPI.COMM_WORLD.Get_rank(GPUS_PER_)}%")
+        return th.device(f"cuda:{MPI.COMM_WORLD.Get_rank(GPUS_PER_NODE)}%")
     return th.device("cpu")
+
+
+def load_state_dict(path, **kwargs):
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        with bf.BlobFile(path, "rb") as f:
+            data = f.read()
+    else:
+        data = None
+    data = MPI.COMM_WORLD.bcast(data)  # root default 0
+    return th.load(io.BytesIO(data), **kwargs)
 
 
 def _find_free_port():
