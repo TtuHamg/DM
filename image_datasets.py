@@ -17,7 +17,9 @@ def load_data(
         # Assume classed are the first part of the filename, like bird_00025.jpg
         class_names = [bf.basename(path).split("_")[0] for path in all_files]
         sorted_classed = {x: i for i, x in enumerate(sorted(class_names))}
-        classed = [sorted_classed[x] for x in class_names]
+        classes = [sorted_classed[x] for x in class_names]
+    # print(class_names)
+    print(sorted_classed)
     dataset = ImageDataset(
         image_size,
         all_files,
@@ -36,7 +38,7 @@ def load_data(
             dataset, batch_size=batch_size, shuffle=True, num_workers=1, drop_last=True
         )
 
-    with True:
+    while True:
         yield from loader
 
 

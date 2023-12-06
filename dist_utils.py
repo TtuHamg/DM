@@ -38,7 +38,7 @@ def setup_dist():
 
 def dev():
     if th.cuda.is_available():
-        return th.device(f"cuda:{MPI.COMM_WORLD.Get_rank(GPUS_PER_NODE)}%")
+        return th.device(f"cuda:{MPI.COMM_WORLD.Get_rank()%GPUS_PER_NODE}")
     return th.device("cpu")
 
 
@@ -50,6 +50,15 @@ def load_state_dict(path, **kwargs):
         data = None
     data = MPI.COMM_WORLD.bcast(data)  # root default 0
     return th.load(io.BytesIO(data), **kwargs)
+
+
+def sync_params(params):
+    """
+    Synchronize a sequence of Tensors across ranks from rank 0.
+    """
+    for p in params:
+        with th.no_grad():
+            dist.broadcast(p, 0)
 
 
 def _find_free_port():

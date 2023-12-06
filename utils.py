@@ -144,3 +144,11 @@ def discretized_gaussian_log_likelihood(x, *, means, log_scales):
     return log_probs
 
 
+# --------------------train.py------------------- #
+
+
+def zero_grad(model_params):
+    for param in model_params:
+        if param.grad is not None:
+            param.grad.detach_()
+            param.grad.zero_()
