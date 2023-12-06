@@ -34,8 +34,8 @@ class TrainLoop:
             model (_type_): _description_
             diffusion (_type_): _description_
             data (loader):
-            batch_size (int): the sum of all ranks' batch
-            microbatch (int): each rank's batch
+            batch_size (int): each rank's batch
+            microbatch (int): if RAM is not enough, split batch_size to microbatch
             lr (float): learning rate
             save_interval (int): when to write in log
             schedule_sampler (_type_, optional): _description_. Defaults to None.
@@ -120,7 +120,7 @@ class TrainLoop:
             self.run_step(batch, cond)
             if self.step % self.save_interval == 0:
                 self.save()
-            # Run for a finite amount of time in integration tests.
+                # Run for a finite amount of time in integration tests.
                 if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
                     return
             self.step += 1
@@ -181,15 +181,15 @@ class TrainLoop:
         lr = self.lr * (1 - frac_done)
         for param_group in self.opt.param_groups:
             param_group["lr"] = lr
-            
+
     def save(self):
         def save_checkpoint(params):
-            state_dict=self._master_params_to_state_dict(params)
-            if dist.get_rank()==0:
+            state_dict = self._master_params_to_state_dict(params)
+            if dist.get_rank() == 0:
                 filename = f"model{(self.step+self.resume_step):06d}.pt"
-            with bf.BlobFile(bf.join(get_blob_logdir(),filename),"wb") as f 
-            th.save(state_dict,f)
-            
+            with bf.BlobFile(bf.join(get_blob_logdir(), filename), "wb") as f:
+                th.save(state_dict, f)
+
         save_checkpoint(self.master_params)
         # save optim
         if dist.get_rank() == 0:
@@ -198,7 +198,7 @@ class TrainLoop:
                 "wb",
             ) as f:
                 th.save(self.opt.state_dict(), f)
-        
+
         # due to additional operations for rank0, other rank are blocked here.
         dist.barrier()
 

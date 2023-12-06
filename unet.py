@@ -242,7 +242,7 @@ class Unet(nn.Module):
             dropout (int, optional): Defaults to 0.
             channel_mult (tuple, optional): used to scale the model_channels to present the channel num in each resolution. Defaults to (1, 2, 4, 8).
             num_heads (int, optional):  the number of heads in attention. Defaults to 1.
-            use_cond_scale_shift (bool, optional): introducing mechanisms of conditions, whether use scale and shift / use just add". Defaults to False.
+            use_cond_scale_shift (bool, optional): introducing mechanisms of conditions, whether use scale and shift / use just add. Defaults to False.
             sample_use_conv (bool, optional): whether use learnable conv after F.interpolate. Defaults to True.
         """
         super().__init__()

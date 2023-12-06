@@ -724,3 +724,9 @@ class GaussianDiffusion:
             "xstart_mse": xstart_mse,
             "noise_mse": noise_mse,
         }
+
+
+class SpacedDiffusion(GaussianDiffusion):
+    def __init__(self,use_timesteps,**kwargs):
+        pass
+        
