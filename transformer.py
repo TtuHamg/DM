@@ -228,6 +228,49 @@ class DiT(nn.Module):
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
+    def unpatchify(self, x):
+        """convert patched images to unpatched images
+        Args:
+            x (tensor): (N, T, patch_size**2*C)
+        """
+        c = self.out_channels
+        p = self.x_embedder.patch_size[0]
+        h = w = int(x.shape[1] ** 0.5)
+        assert h * w == x.shape[1]
+
+        x = x.reshape(shape=(x.shape[0], h, w, p, p, c))
+        x = th.einsum("nhwpqc->nchpwp", x)
+        imgs = x.reshape(shape=(x.shape[0], c, h * p, w * p))
+        return imgs
+
+    def forward(self, x, t, y):
+        x = (
+            self.x_embedder(x) + self.pos_embed
+        )  # (N, T, D), where T = H * W / patch_size ** 2
+        t = self.t_embedder(t)  # (N, D)
+        y = self.class_embedder(y, self.training)  # (N, D)
+        c = t + y  # (N, D)
+        for block in self.blocks:
+            x = block(x, c)  # (N, T, D)
+        x = self.final_layer(x)  # (N, T, patch_size ** 2 * out_channels)
+        x = self.unpatchify(x)  # (N, out_channels, H, W)
+        return x
+
+    def forward_with_cfg(self, x, t, y, cfg_scale):
+        """
+        Forward pass of DiT, but also batches the unconditional forward pass for classifier-free guidance.
+        notes: when use forward_with_cfg, the input of x is duplicated in batch dimension, and y is th.cat by [labels, 1000]
+        """
+
+        half = x[: len(x) // 2]
+        combinded = th.cat([half, half], dim=0)
+        model_out = self.forward(combinded, t, y)
+        eps, rest = model_out[:, :3], model_out[:, 3:]
+        cond_eps, uncond_eps = th.split(eps, len(eps) // 2, dim=0)
+        half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
+        eps = th.cat([half_eps, half_eps], dim=0)
+        return th.cat([eps, rest], dim=1)
+
 
 def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_tokens=0):
     grid_h = np.arange(grid_size, dtype=np.float32)
@@ -303,3 +346,72 @@ def get_2d_rotation_pos_embed(embed_dim, grid_size):
     col_embed = pos_embed[id_col]
     row_col_embed = th.concat([row_embed, col_embed], dim=-1)
     return row_col_embed
+
+
+#################################################################################
+#                                   DiT Configs                                  #
+#################################################################################
+
+
+def DiT_XL_2(**kwargs):
+    return DiT(depth=28, hidden_size=1152, patch_size=2, num_heads=16, **kwargs)
+
+
+def DiT_XL_4(**kwargs):
+    return DiT(depth=28, hidden_size=1152, patch_size=4, num_heads=16, **kwargs)
+
+
+def DiT_XL_8(**kwargs):
+    return DiT(depth=28, hidden_size=1152, patch_size=8, num_heads=16, **kwargs)
+
+
+def DiT_L_2(**kwargs):
+    return DiT(depth=24, hidden_size=1024, patch_size=2, num_heads=16, **kwargs)
+
+
+def DiT_L_4(**kwargs):
+    return DiT(depth=24, hidden_size=1024, patch_size=4, num_heads=16, **kwargs)
+
+
+def DiT_L_8(**kwargs):
+    return DiT(depth=24, hidden_size=1024, patch_size=8, num_heads=16, **kwargs)
+
+
+def DiT_B_2(**kwargs):
+    return DiT(depth=12, hidden_size=768, patch_size=2, num_heads=12, **kwargs)
+
+
+def DiT_B_4(**kwargs):
+    return DiT(depth=12, hidden_size=768, patch_size=4, num_heads=12, **kwargs)
+
+
+def DiT_B_8(**kwargs):
+    return DiT(depth=12, hidden_size=768, patch_size=8, num_heads=12, **kwargs)
+
+
+def DiT_S_2(**kwargs):
+    return DiT(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
+
+
+def DiT_S_4(**kwargs):
+    return DiT(depth=12, hidden_size=384, patch_size=4, num_heads=6, **kwargs)
+
+
+def DiT_S_8(**kwargs):
+    return DiT(depth=12, hidden_size=384, patch_size=8, num_heads=6, **kwargs)
+
+
+DiT_models = {
+    "DiT-XL/2": DiT_XL_2,
+    "DiT-XL/4": DiT_XL_4,
+    "DiT-XL/8": DiT_XL_8,
+    "DiT-L/2": DiT_L_2,
+    "DiT-L/4": DiT_L_4,
+    "DiT-L/8": DiT_L_8,
+    "DiT-B/2": DiT_B_2,
+    "DiT-B/4": DiT_B_4,
+    "DiT-B/8": DiT_B_8,
+    "DiT-S/2": DiT_S_2,
+    "DiT-S/4": DiT_S_4,
+    "DiT-S/8": DiT_S_8,
+}
